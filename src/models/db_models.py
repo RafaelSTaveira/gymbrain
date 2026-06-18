@@ -38,7 +38,7 @@ class Registro(Base):
     exercicio_id = Column(ForeignKey("exercicios.id"), nullable=False)
     nome_original = Column(String(255), nullable=True)
     series = Column(Integer, nullable=True)
-    repeticoes = Column(String(20), nullable=True)
+    repeticoes = Column(String(255), nullable=True)
     carga_kg = Column(Float, nullable=True)
 
     treino = relationship("Treino", back_populates="registros")

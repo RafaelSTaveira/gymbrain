@@ -7,7 +7,7 @@ from pathlib import Path
 
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
-from google.rpc.error_details_pb2 import RetryInfo
+from google.rpc.error_details_pb2 import QuotaFailure, RetryInfo
 
 from src.config import BRONZE_DIR, GEMINI_API_KEY, GEMINI_MODEL_NAME
 from src.models.schemas import TreinoBronze
@@ -22,6 +22,15 @@ MIN_SECONDS_BETWEEN_CALLS = 3.5
 MAX_RETRIES_ON_RATE_LIMIT = 5
 
 _last_call_at: float = 0.0
+
+
+class DailyQuotaExceededError(RuntimeError):
+    """A cota diaria de requisicoes do free tier (nao a de RPM) foi esgotada.
+
+    Diferente do 429 de RPM, esperar e tentar de novo nao resolve: a cota so
+    volta no proximo reset diario da Gemini API.
+    """
+
 
 PROMPT = """\
 Você é um assistente especializado em extrair dados de fichas de treino de \
@@ -83,6 +92,20 @@ def _retry_delay_seconds(exc: ResourceExhausted) -> float | None:
     return None
 
 
+def _daily_quota_violation(exc: ResourceExhausted) -> QuotaFailure.Violation | None:
+    """Procura uma violacao de cota *diaria* (quota_id contendo "PerDay") no 429.
+
+    Essa cota e separada da de RPM: nenhum retry/backoff a resolve antes do
+    proximo reset diario da API.
+    """
+    for detail in getattr(exc, "details", None) or []:
+        if isinstance(detail, QuotaFailure):
+            for violation in detail.violations:
+                if "PerDay" in violation.quota_id:
+                    return violation
+    return None
+
+
 def _generate_content_with_retry(model: genai.GenerativeModel, contents: list, generation_config: dict):
     """Chama a Gemini API respeitando o rate limit, com retry e backoff em 429."""
     for attempt in range(1, MAX_RETRIES_ON_RATE_LIMIT + 1):
@@ -90,6 +113,13 @@ def _generate_content_with_retry(model: genai.GenerativeModel, contents: list, g
         try:
             return model.generate_content(contents, generation_config=generation_config)
         except ResourceExhausted as exc:
+            violation = _daily_quota_violation(exc)
+            if violation is not None:
+                raise DailyQuotaExceededError(
+                    f"Cota diaria do free tier esgotada para o modelo "
+                    f"'{GEMINI_MODEL_NAME}' (limite: {violation.quota_value} requisicoes/dia). "
+                    "Aguarde o reset diario da Gemini API ou habilite billing/troque de modelo."
+                ) from exc
             if attempt == MAX_RETRIES_ON_RATE_LIMIT:
                 raise
             wait_seconds = _retry_delay_seconds(exc)
@@ -158,7 +188,8 @@ def extract_all(raw_dir: Path) -> list[Path]:
 
     Arquivos com erro de extracao (API ou arquivo corrompido) sao
     registrados no log e pulados, sem interromper o processamento dos
-    demais.
+    demais. Ja o esgotamento da cota *diaria* interrompe o processamento
+    imediatamente, pois todos os arquivos restantes falhariam do mesmo jeito.
     """
     saved_paths: list[Path] = []
     for file_path in sorted(raw_dir.iterdir()):
@@ -166,6 +197,9 @@ def extract_all(raw_dir: Path) -> list[Path]:
             continue
         try:
             saved_paths.append(extract_and_save(file_path))
+        except DailyQuotaExceededError as exc:
+            logger.error("%s Interrompendo o processamento dos arquivos restantes.", exc)
+            break
         except Exception:
             logger.exception("Falha ao processar %s, pulando para o proximo arquivo", file_path)
     return saved_paths
