@@ -52,8 +52,10 @@ def pipeline_fichas():
     def load_gold(silver_paths: list[str]) -> None:
         """Carrega os treinos validados da Silver no PostgreSQL (Gold)."""
         from src.gold.loader import load_all
+        from src.init_db import init_db
         from src.models.schemas import TreinoSilver
 
+        init_db()
         treinos = [
             TreinoSilver.model_validate_json(Path(silver_path).read_text(encoding="utf-8"))
             for silver_path in silver_paths
