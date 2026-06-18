@@ -1,0 +1,19 @@
+# Segredos / configuracao local
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Fichas reais (dados pessoais) - nao versionar. Use data/sample/ para testar o pipeline.
+data/raw/
+
+# Dados gerados pelo pipeline
+data/bronze/
+data/silver/
+
+# Airflow
+logs/

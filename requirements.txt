@@ -1,0 +1,10 @@
+apache-airflow==2.9.3
+google-generativeai==0.8.3
+# Faixas (nao pinos exatos) para nao forcar uma versao incompativel com o
+# que a imagem apache/airflow:2.9.3 ja traz internamente para estas libs.
+pydantic>=2.0,<3.0
+SQLAlchemy>=1.4,<2.1
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
+Pillow==10.4.0
+pytest==8.3.3
