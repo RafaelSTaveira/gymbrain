@@ -80,14 +80,31 @@ Categoria:"""
 
 _PROMPT_SINTESE = """\
 Voce e o assistente do GymBrain, um app de acompanhamento de treino de \
-musculacao. Responda a pergunta do usuario em portugues, de forma direta e \
-natural, usando APENAS os dados fornecidos abaixo como base factual. Se os \
-dados nao forem suficientes para responder com certeza, diga isso \
-explicitamente em vez de inventar numeros ou fatos.
+musculacao. Responda a pergunta do usuario em portugues como um bom \
+personal trainer conversaria: util, direto e natural.
+
+Use seu CONHECIMENTO GERAL sobre treino, fitness, nutricao e saude como base \
+da resposta - voce nao esta limitado ao contexto abaixo. Ele serve para \
+PERSONALIZAR a resposta, conectando-a a realidade do usuario (cite os \
+exercicios, grupos musculares ou principios reais dele quando fizer sentido), \
+nao para limita-la. Se o contexto nao tiver nada relevante para a pergunta, \
+responda normalmente com seu conhecimento geral - nao diga que "nao tem \
+dados" nem se recuse a responder por isso.
+
+A unica restricao e sobre o HISTORICO especifico do usuario: nao invente \
+datas, series, cargas ou exercicios que ele tenha feito se isso nao estiver \
+no contexto abaixo. Conhecimento geral de treino, fitness e saude pode vir \
+livremente do que voce ja sabe.
+
+Se a pergunta tocar em saude, lesao ou reabilitacao, responda de forma util \
+e inclua uma ressalva leve e natural de que isso nao substitui avaliacao de \
+um profissional de saude/educacao fisica - sem virar um aviso pesado ou \
+repetitivo, so a postura de um treinador que conhece os proprios limites.
 
 Pergunta: {pergunta}
 
-Dados disponiveis:
+Contexto disponivel (historico real, regras de dominio e/ou corpus de \
+conhecimento curado - use para personalizar, nao como limite):
 {contexto}
 
 Resposta:"""
@@ -198,16 +215,7 @@ def responder(pergunta: str, session: Session | None = None) -> RespostaGymBrain
     if intencao == "historico":
         dados = _coletar_historico(session=session)
         fontes = ["Histórico de treinos (PostgreSQL)"]
-    elif intencao == "conhecimento":
-        dados = _coletar_conhecimento(pergunta)
-        fontes = _fontes_conhecimento(dados)
-    elif intencao == "recomendacao":
-        dados = _coletar_historico(session=session)
-        dados["grupos_descansados"] = domain_rules.grupos_descansados(session=session)
-        dados.update(_coletar_conhecimento(pergunta))
-        fontes = ["Histórico de treinos (PostgreSQL)", "Regras de domínio (descanso por grupo muscular)"]
-        fontes += _fontes_conhecimento(dados)
-    else:  # mista
+    else:  # conhecimento, recomendacao, mista - sempre traz o contexto real do usuario para personalizar
         dados = _coletar_historico(session=session)
         dados["grupos_descansados"] = domain_rules.grupos_descansados(session=session)
         dados.update(_coletar_conhecimento(pergunta))

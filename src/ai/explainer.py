@@ -38,8 +38,15 @@ def explicar(resposta: RespostaGymBrain) -> str:
         linhas.append("Princípios de treino consultados em: " + ", ".join(fontes_unicas) + ".")
 
     if resposta.fontes:
-        linhas.append("Fontes usadas para esta resposta: " + "; ".join(resposta.fontes) + ".")
+        linhas.append(
+            "Resposta combinando o conhecimento geral do modelo (Gemini) com: "
+            + "; ".join(resposta.fontes)
+            + "."
+        )
     else:
-        linhas.append("Nenhuma fonte de dados externa foi necessaria para esta resposta.")
+        linhas.append(
+            "Resposta baseada no conhecimento geral do modelo (Gemini); nenhuma fonte de dados "
+            "local do usuário foi relevante para esta pergunta."
+        )
 
     return "\n".join(linhas)
