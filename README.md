@@ -5,10 +5,11 @@ Pipeline de dados que transforma fichas de treino de musculação heterogêneas
 relacional limpa, padronizada e consultável.
 
 Este é o projeto de portfólio para vagas de **Engenharia de Dados, Análise
-de Dados e IA**. O repositório cobre duas fases: a **Fase 1**, a fundação de
-dados e o pipeline de ETL, e a **Fase 2**, a camada de IA que responde
-perguntas sobre o histórico de treinos e gera recomendações explicáveis. Uma
-interface gráfica (Fase 3) fica fora do escopo aqui.
+de Dados e IA**. O repositório cobre três fases: a **Fase 1**, a fundação de
+dados e o pipeline de ETL; a **Fase 2**, a camada de IA que responde
+perguntas sobre o histórico de treinos e gera recomendações explicáveis; e a
+**Fase 3**, a interface em Streamlit (chat + dashboard) que expõe tudo isso
+no navegador.
 
 ## O problema
 
@@ -179,6 +180,8 @@ uma caixa-preta.
 - **PostgreSQL** + **SQLAlchemy** — banco relacional final
 - **Pandas** — consultas estruturadas sobre o histórico (Fase 2)
 - **ChromaDB** + **Sentence Transformers** — busca semântica (RAG) no corpus de conhecimento (Fase 2)
+- **Streamlit** — interface web (chat + dashboard) (Fase 3)
+- **Plotly** — gráficos do dashboard (Fase 3)
 - **Docker + docker-compose** — Airflow e PostgreSQL locais
 - **pytest** — testes automatizados
 
@@ -189,6 +192,11 @@ gymbrain/
 ├── docker-compose.yml
 ├── .env.example
 ├── requirements.txt
+├── app/                             # interface Streamlit (Fase 3)
+│   ├── Home.py                      # pagina inicial: visao geral + metricas
+│   └── pages/
+│       ├── 1_Chat.py               # chat com o GymBrain (reaproveita src/ai/)
+│       └── 2_Dashboard.py          # dashboard de estatisticas do historico
 ├── dags/
 │   └── pipeline_fichas.py          # DAG do Airflow (extract >> transform >> load)
 ├── src/
@@ -224,6 +232,7 @@ gymbrain/
 └── tests/
     ├── test_standardizer.py
     ├── test_validator.py
+    ├── test_gemini_client.py
     ├── test_sql_layer.py
     ├── test_domain_rules.py
     ├── test_rag_layer.py
@@ -314,6 +323,35 @@ o schema, se ainda não existir) e da mesma `GEMINI_API_KEY` usada na Fase 1 —
 o free tier compartilha a cota diária entre a extração Bronze e a camada de
 IA, então rodar as duas no mesmo dia pode esgotar a cota mais rápido.
 
+### 6. Rodar a interface (Fase 3)
+
+A interface é uma camada fina em Streamlit sobre `src/ai/` — não reimplementa
+nenhuma consulta, RAG ou regra, só chama as funções já existentes.
+
+Pré-requisito: o PostgreSQL precisa estar de pé (`docker compose up -d postgres`,
+ou o `docker compose up -d` completo do passo 2) e acessível em
+`localhost:5432`, já que o Streamlit roda localmente, fora do Docker.
+
+```bash
+streamlit run app/Home.py
+```
+
+Abre em [localhost:8501](http://localhost:8501), com três páginas:
+
+- **Home** — métricas gerais do banco (treinos, exercícios, registros).
+- **Chat** — converse com o GymBrain (`responder()`); cada resposta vem com
+  um expander "Por que essa resposta?" (`explicar()`), mostrando os dados e
+  regras que a embasaram. Se a cota diária gratuita da Gemini API esgotar, o
+  chat mostra um aviso amigável em vez de quebrar.
+- **Dashboard** — estatísticas visuais do histórico (volume por grupo,
+  exercícios mais frequentes, cobertura do dicionário canônico, último
+  treino por grupo), calculadas só com `sql_layer.py` — não consome cota do
+  Gemini.
+
+**Atenção:** assim como a Fase 2, o Chat consome a cota diária gratuita da
+Gemini API (~20 requisições/dia) compartilhada com a extração Bronze e com
+qualquer outro uso da camada de IA no mesmo dia.
+
 ## Qualidade de dados
 
 Três camadas de rede de segurança evitam que dados ruins ou incompletos
@@ -334,8 +372,10 @@ sejam tratados como se não tivessem problema:
 
 ## Roadmap (fora do escopo desta fase)
 
-- **Fase 3** — interface para consulta e acompanhamento.
 - Possíveis extensões da Fase 2: alertas de estagnação de carga ao longo do
   tempo, sugestão automática de variação de exercício por repetição
   excessiva, e um cadastro de equipamento verificado (hoje inferido por
   heurística a partir do nome do exercício).
+- Possíveis extensões da Fase 3: autenticação multi-usuário, deploy hospedado
+  (hoje a interface roda só localmente) e cache do histórico de chat entre
+  sessões (hoje vive só em `st.session_state`, é perdido ao recarregar).
