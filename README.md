@@ -5,9 +5,10 @@ Pipeline de dados que transforma fichas de treino de musculação heterogêneas
 relacional limpa, padronizada e consultável.
 
 Este é o projeto de portfólio para vagas de **Engenharia de Dados, Análise
-de Dados e IA**. Este repositório cobre a **Fase 1**: a fundação de dados e
-o pipeline de ETL. Fases futuras (RAG sobre o histórico de treinos, motor de
-regras de domínio e interface) ficam fora do escopo aqui.
+de Dados e IA**. O repositório cobre duas fases: a **Fase 1**, a fundação de
+dados e o pipeline de ETL, e a **Fase 2**, a camada de IA que responde
+perguntas sobre o histórico de treinos e gera recomendações explicáveis. Uma
+interface gráfica (Fase 3) fica fora do escopo aqui.
 
 ## O problema
 
@@ -94,15 +95,92 @@ modelo relacional simples:
   mesmo os marcados como `"Não Mapeado"` (que compartilham um único
   `exercicio_id` genérico) ficam rastreáveis individualmente direto via SQL.
 
+## Arquitetura da Fase 2 — camada de IA
+
+```
+┌─────────────┐     ┌──────────────────────────────────────────────┐
+│  pergunta   │ --> │              src/ai/orchestrator.py            │
+│  do usuario │     │  classifica intencao (heuristica -> Gemini)    │
+└─────────────┘     │  roteia para 1+ fontes e sintetiza a resposta  │
+                     └───────┬───────────────┬───────────────┬──────┘
+                             │               │               │
+                  historico  │  conhecimento │  recomendacao  │
+                             v               v               v
+                   ┌──────────────┐ ┌───────────────┐ ┌──────────────────┐
+                   │ sql_layer.py │ │  rag_layer.py  │ │ domain_rules.py   │
+                   │ Pandas sobre │ │ ChromaDB +     │ │ regras            │
+                   │ o Postgres   │ │ Sentence       │ │ deterministicas   │
+                   │ (Gold)       │ │ Transformers   │ │ (sem LLM)         │
+                   └──────────────┘ └───────────────┘ └──────────────────┘
+                             │               │               │
+                             └───────────────┴───────────────┘
+                                             v
+                                  src/ai/explainer.py
+                          explica a resposta rastreando aos
+                          dados e regras que a geraram
+```
+
+O orquestrador nunca chama o LLM mais do que o necessário: a classificação
+de intenção tenta primeiro uma heurística por palavras-chave (custo zero de
+cota) e só recorre à Gemini API quando a pergunta é ambígua. Na pior
+hipótese, uma pergunta consome 2 chamadas (classificação + síntese da
+resposta final) - dentro do limite de ~20 requisições/dia do free tier.
+
+### Consultas estruturadas (src/ai/sql_layer.py)
+
+Funções com Pandas/SQLAlchemy sobre as tabelas do Gold: volume e frequência
+por grupo muscular, último treino de cada grupo, exercícios mais frequentes
+e dias desde o último treino de um grupo. Como muitas fichas reais não
+trazem data, toda função baseada em tempo ignora explicitamente os treinos
+sem `data_treino` e informa quantos foram ignorados (`treinos_sem_data_ignorados`),
+em vez de fingir que a análise é completa.
+
+### Conhecimento (src/ai/rag_layer.py + src/scripts/index_knowledge.py)
+
+Um corpus curado de 4 documentos (`data/knowledge/*.md` — hipertrofia,
+periodização, faixas de repetição, descanso/recuperação) é dividido em
+chunks por seção, transformado em embeddings com o modelo Sentence
+Transformers `paraphrase-multilingual-MiniLM-L12-v2` e indexado num ChromaDB
+persistente local (`data/chroma/`). `buscar_conhecimento(pergunta, k=3)` faz
+a busca semântica e devolve cada chunk com a fonte (qual arquivo), para que
+toda afirmação conceitual seja rastreável a um documento real.
+
+### Regras de domínio (src/ai/domain_rules.py)
+
+Regras deterministicas, sem LLM: `grupos_descansados` (grupos sem treino
+recente no histórico), `adaptar_exercicio` (sugere alternativa do mesmo
+grupo muscular quando falta equipamento) e `validar_treino` (checa se um
+treino proposto cabe no tempo disponível e não sobrecarrega um grupo
+recém-treinado). O dicionário canônico não tem um campo de equipamento
+dedicado, então `adaptar_exercicio` infere o equipamento a partir do nome do
+exercício: por palavra-chave ("com Barra", "no Smith", "no Cabo"...) e, para
+os ~40 nomes que não mencionam o equipamento no texto (ex: "Levantamento
+Terra", "Rosca Concentrada", "Pulldown"), por uma lista curada manualmente
+com o equipamento convencional de cada um. É uma heurística documentada, não
+um cadastro de equipamentos verificado.
+
+### Orquestrador e explicabilidade (orchestrator.py + explainer.py)
+
+`responder(pergunta)` classifica a intenção, roteia para SQL/RAG/regras
+conforme o tipo de pergunta, e sintetiza a resposta final via Gemini a
+partir dos dados coletados — nunca a partir do conhecimento geral do
+modelo. `explicar(resposta)` percorre os dados brutos guardados na resposta
+(`RespostaGymBrain.dados_brutos`) e gera uma explicação em texto simples do
+porquê: quais grupos estavam descansados, qual foi o último treino de cada
+grupo, quais documentos do corpus foram consultados. A recomendação nunca é
+uma caixa-preta.
+
 ## Stack técnica
 
 - **Python 3.11+**
-- **Apache Airflow** — orquestração da DAG
-- **Google Gemini API** — extração multimodal de imagens/PDFs
+- **Apache Airflow** — orquestração da DAG do ETL (Fase 1)
+- **Google Gemini API** — extração multimodal de imagens/PDFs e orquestrador/síntese da camada de IA
 - **Pydantic** — validação de schema (Bronze e Silver)
 - **PostgreSQL** + **SQLAlchemy** — banco relacional final
+- **Pandas** — consultas estruturadas sobre o histórico (Fase 2)
+- **ChromaDB** + **Sentence Transformers** — busca semântica (RAG) no corpus de conhecimento (Fase 2)
 - **Docker + docker-compose** — Airflow e PostgreSQL locais
-- **pytest** — testes automatizados (25 testes em standardizer e validator)
+- **pytest** — testes automatizados
 
 ## Estrutura de pastas
 
@@ -122,18 +200,35 @@ gymbrain/
 │   │   └── exercise_dictionary.py  # dicionario canonico de exercicios
 │   ├── gold/
 │   │   └── loader.py               # carga no PostgreSQL
+│   ├── ai/                         # camada de IA (Fase 2)
+│   │   ├── sql_layer.py            # consultas estruturadas (Pandas) sobre o Gold
+│   │   ├── rag_layer.py            # indexacao e busca semantica (ChromaDB)
+│   │   ├── domain_rules.py         # regras deterministicas (sem LLM)
+│   │   ├── orchestrator.py         # classifica intencao, roteia, sintetiza
+│   │   └── explainer.py            # explicabilidade da resposta
+│   ├── scripts/
+│   │   └── index_knowledge.py      # le data/knowledge/ e popula o ChromaDB
 │   ├── models/
 │   │   ├── schemas.py              # modelos Pydantic (Bronze/Silver)
 │   │   └── db_models.py            # modelos SQLAlchemy (Gold)
-│   └── config.py                   # configuracoes e variaveis de ambiente
+│   ├── config.py                   # configuracoes e variaveis de ambiente
+│   ├── gemini_client.py            # chamadas a Gemini com rate limit/retry/cota
+│   └── init_db.py                  # cria o schema do Gold (idempotente)
 ├── data/
 │   ├── raw/                        # PDFs e fotos originais (input, gitignored)
 │   ├── sample/                     # fichas ficticias/anonimizadas, versionadas
 │   ├── bronze/                     # JSON bruto extraido
-│   └── silver/                     # JSON padronizado, validado + log de rejeitados
+│   ├── silver/                     # JSON padronizado, validado + log de rejeitados
+│   ├── knowledge/                  # corpus de conhecimento curado (Fase 2, versionado)
+│   └── chroma/                     # banco vetorial persistente (gitignored, gerado)
 └── tests/
     ├── test_standardizer.py
-    └── test_validator.py
+    ├── test_validator.py
+    ├── test_sql_layer.py
+    ├── test_domain_rules.py
+    ├── test_rag_layer.py
+    ├── test_orchestrator.py
+    └── test_explainer.py
 ```
 
 ### Sobre `data/raw/` vs. `data/sample/`
@@ -194,10 +289,35 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
+### 5. Usar a camada de IA (Fase 2)
+
+Indexe o corpus de conhecimento uma vez (gera `data/chroma/`, local e
+persistente):
+
+```bash
+python -m src.scripts.index_knowledge
+```
+
+Depois, pergunte pelo terminal:
+
+```python
+from src.ai.orchestrator import responder
+from src.ai.explainer import explicar
+
+resposta = responder("Quantas séries eu fiz de peito no último mês?")
+print(resposta.resposta)
+print(explicar(resposta))
+```
+
+`responder()` precisa do banco do Gold populado (`python -m src.init_db` cria
+o schema, se ainda não existir) e da mesma `GEMINI_API_KEY` usada na Fase 1 —
+o free tier compartilha a cota diária entre a extração Bronze e a camada de
+IA, então rodar as duas no mesmo dia pode esgotar a cota mais rápido.
+
 ## Qualidade de dados
 
-Duas camadas de rede de segurança evitam que dados ruins cheguem ao banco
-final sem visibilidade:
+Três camadas de rede de segurança evitam que dados ruins ou incompletos
+sejam tratados como se não tivessem problema:
 
 1. **"Não Mapeado"** — exercício extraído mas não reconhecido pelo
    dicionário canônico. Não é descartado; é carregado normalmente, mas
@@ -207,10 +327,15 @@ final sem visibilidade:
 2. **Rejeitados** — registros que violam regras de negócio (série ≤ 0,
    carga negativa) nunca chegam ao Gold; ficam logados em
    `data/silver/rejeitados.jsonl` com o motivo exato da rejeição.
+3. **Treinos sem data** — boa parte das fichas reais não traz a data do
+   treino. Toda função de análise temporal da camada de IA (`src/ai/sql_layer.py`)
+   ignora esses treinos explicitamente e informa quantos foram ignorados, em
+   vez de aparentar uma análise completa que na verdade está incompleta.
 
 ## Roadmap (fora do escopo desta fase)
 
-- **Fase 2** — RAG sobre o histórico consolidado de treinos.
-- **Fase 3** — motor de regras de domínio (progressão de carga, alertas de
-  estagnação, sugestão de variação de exercício).
-- **Fase 4** — interface para consulta e acompanhamento.
+- **Fase 3** — interface para consulta e acompanhamento.
+- Possíveis extensões da Fase 2: alertas de estagnação de carga ao longo do
+  tempo, sugestão automática de variação de exercício por repetição
+  excessiva, e um cadastro de equipamento verificado (hoje inferido por
+  heurística a partir do nome do exercício).
