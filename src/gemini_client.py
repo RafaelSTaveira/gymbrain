@@ -6,7 +6,9 @@ tratamento de rate limit (RPM) e de cota diaria esgotada do free tier.
 """
 
 import logging
+import re
 import time
+from collections.abc import Mapping
 
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
@@ -20,6 +22,10 @@ logger = logging.getLogger(__name__)
 # Espacar as chamadas evita boa parte dos 429 antes mesmo de acontecerem.
 MIN_SECONDS_BETWEEN_CALLS = 3.5
 MAX_RETRIES_ON_RATE_LIMIT = 5
+
+# Limite diario do free tier (requisicoes/dia). Usado como fallback quando o
+# 429 nao informa quota_value (ex: violation sem esse campo).
+FREE_TIER_DAILY_LIMIT = 20
 
 _last_call_at: float = 0.0
 _configurado = False
@@ -59,7 +65,21 @@ def _retry_delay_seconds(exc: ResourceExhausted) -> float | None:
     return None
 
 
-def _daily_quota_violation(exc: ResourceExhausted) -> QuotaFailure.Violation | None:
+def _violation_field(violation, name: str, json_name: str):
+    """Le um campo de uma violacao de cota, que pode vir como proto ou dict.
+
+    O transporte REST da API entrega os details do 429 como dicts JSON
+    (chaves camelCase, ex: "quotaId"), enquanto o transporte grpc entrega
+    mensagens protobuf (atributos snake_case, ex: quota_id). Alem disso,
+    nem toda violacao traz o campo preenchido (ex: "violations": [{}]).
+    Usar getattr/.get direto sem isso e o que causava o AttributeError.
+    """
+    if isinstance(violation, Mapping):
+        return violation.get(json_name) or violation.get(name)
+    return getattr(violation, name, None)
+
+
+def _daily_quota_violation(exc: ResourceExhausted):
     """Procura uma violacao de cota *diaria* (quota_id contendo "PerDay") no 429.
 
     Essa cota e separada da de RPM: nenhum retry/backoff a resolve antes do
@@ -68,9 +88,24 @@ def _daily_quota_violation(exc: ResourceExhausted) -> QuotaFailure.Violation | N
     for detail in getattr(exc, "details", None) or []:
         if isinstance(detail, QuotaFailure):
             for violation in detail.violations:
-                if "PerDay" in violation.quota_id:
+                quota_id = _violation_field(violation, "quota_id", "quotaId") or ""
+                if "PerDay" in quota_id:
                     return violation
     return None
+
+
+def _is_daily_quota_message(exc: ResourceExhausted) -> bool:
+    """Sinal alternativo de cota diaria esgotada quando o 429 nao traz quota_id.
+
+    O free tier expoe a cota diaria pela metrica
+    "...generate_content_free_tier_requests" com limite de 20/dia: quando a
+    violacao vem sem quota_id (ex: "violations": [{}]), usamos a mensagem de
+    erro do 429 como sinal alternativo.
+    """
+    message = str(exc).lower()
+    if "free_tier_requests" not in message:
+        return False
+    return bool(re.search(rf"\b{FREE_TIER_DAILY_LIMIT}\b", message))
 
 
 def generate_content_with_retry(model: genai.GenerativeModel, contents: list, generation_config: dict | None = None):
@@ -85,10 +120,12 @@ def generate_content_with_retry(model: genai.GenerativeModel, contents: list, ge
             return model.generate_content(contents, generation_config=generation_config)
         except ResourceExhausted as exc:
             violation = _daily_quota_violation(exc)
-            if violation is not None:
+            if violation is not None or _is_daily_quota_message(exc):
+                quota_value = _violation_field(violation, "quota_value", "quotaValue") if violation is not None else None
+                limite = quota_value or FREE_TIER_DAILY_LIMIT
                 raise DailyQuotaExceededError(
                     f"Cota diaria do free tier esgotada para o modelo "
-                    f"'{model.model_name}' (limite: {violation.quota_value} requisicoes/dia). "
+                    f"'{model.model_name}' (limite: {limite} requisicoes/dia). "
                     "Aguarde o reset diario da Gemini API ou habilite billing/troque de modelo."
                 ) from exc
             if attempt == MAX_RETRIES_ON_RATE_LIMIT:
