@@ -2,35 +2,15 @@
 
 import json
 import logging
-import time
 from pathlib import Path
 
-import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
-from google.rpc.error_details_pb2 import QuotaFailure, RetryInfo
-
-from src.config import BRONZE_DIR, GEMINI_API_KEY, GEMINI_MODEL_NAME
+from src.config import BRONZE_DIR
+from src.gemini_client import DailyQuotaExceededError, build_model, generate_content_with_retry
 from src.models.schemas import TreinoBronze
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_SUFFIXES = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
-
-# O free tier da Gemini API limita ~20 requisicoes/minuto por modelo.
-# Espacar as chamadas evita boa parte dos 429 antes mesmo de acontecerem.
-MIN_SECONDS_BETWEEN_CALLS = 3.5
-MAX_RETRIES_ON_RATE_LIMIT = 5
-
-_last_call_at: float = 0.0
-
-
-class DailyQuotaExceededError(RuntimeError):
-    """A cota diaria de requisicoes do free tier (nao a de RPM) foi esgotada.
-
-    Diferente do 429 de RPM, esperar e tentar de novo nao resolve: a cota so
-    volta no proximo reset diario da Gemini API.
-    """
-
 
 PROMPT = """\
 Você é um assistente especializado em extrair dados de fichas de treino de \
@@ -70,70 +50,6 @@ def _mime_type(file_path: Path) -> str:
     return SUPPORTED_SUFFIXES[suffix]
 
 
-def _build_model() -> genai.GenerativeModel:
-    genai.configure(api_key=GEMINI_API_KEY)
-    return genai.GenerativeModel(GEMINI_MODEL_NAME)
-
-
-def _wait_for_rate_limit() -> None:
-    """Garante um intervalo minimo entre chamadas para respeitar o limite de RPM."""
-    global _last_call_at
-    remaining = MIN_SECONDS_BETWEEN_CALLS - (time.monotonic() - _last_call_at)
-    if remaining > 0:
-        time.sleep(remaining)
-    _last_call_at = time.monotonic()
-
-
-def _retry_delay_seconds(exc: ResourceExhausted) -> float | None:
-    """Extrai o tempo de espera sugerido pela API (google.rpc.RetryInfo), se houver."""
-    for detail in getattr(exc, "details", None) or []:
-        if isinstance(detail, RetryInfo):
-            return detail.retry_delay.seconds + detail.retry_delay.nanos / 1e9
-    return None
-
-
-def _daily_quota_violation(exc: ResourceExhausted) -> QuotaFailure.Violation | None:
-    """Procura uma violacao de cota *diaria* (quota_id contendo "PerDay") no 429.
-
-    Essa cota e separada da de RPM: nenhum retry/backoff a resolve antes do
-    proximo reset diario da API.
-    """
-    for detail in getattr(exc, "details", None) or []:
-        if isinstance(detail, QuotaFailure):
-            for violation in detail.violations:
-                if "PerDay" in violation.quota_id:
-                    return violation
-    return None
-
-
-def _generate_content_with_retry(model: genai.GenerativeModel, contents: list, generation_config: dict):
-    """Chama a Gemini API respeitando o rate limit, com retry e backoff em 429."""
-    for attempt in range(1, MAX_RETRIES_ON_RATE_LIMIT + 1):
-        _wait_for_rate_limit()
-        try:
-            return model.generate_content(contents, generation_config=generation_config)
-        except ResourceExhausted as exc:
-            violation = _daily_quota_violation(exc)
-            if violation is not None:
-                raise DailyQuotaExceededError(
-                    f"Cota diaria do free tier esgotada para o modelo "
-                    f"'{GEMINI_MODEL_NAME}' (limite: {violation.quota_value} requisicoes/dia). "
-                    "Aguarde o reset diario da Gemini API ou habilite billing/troque de modelo."
-                ) from exc
-            if attempt == MAX_RETRIES_ON_RATE_LIMIT:
-                raise
-            wait_seconds = _retry_delay_seconds(exc)
-            if wait_seconds is None:
-                wait_seconds = 2**attempt  # backoff exponencial caso a API nao informe o retry_delay
-            logger.warning(
-                "Rate limit da Gemini API (tentativa %d/%d), aguardando %.1fs antes de tentar novamente.",
-                attempt,
-                MAX_RETRIES_ON_RATE_LIMIT,
-                wait_seconds,
-            )
-            time.sleep(wait_seconds)
-
-
 def extract_treino(file_path: Path) -> TreinoBronze:
     """Envia uma ficha (imagem ou PDF) para a Gemini API e retorna o TreinoBronze extraido."""
     if not file_path.exists():
@@ -147,9 +63,9 @@ def extract_treino(file_path: Path) -> TreinoBronze:
         logger.error("Falha ao ler o arquivo %s: %s", file_path, exc)
         raise
 
-    model = _build_model()
+    model = build_model()
     try:
-        response = _generate_content_with_retry(
+        response = generate_content_with_retry(
             model,
             [PROMPT, {"mime_type": mime_type, "data": file_bytes}],
             {"response_mime_type": "application/json"},
