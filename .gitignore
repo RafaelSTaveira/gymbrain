@@ -15,5 +15,8 @@ data/raw/
 data/bronze/
 data/silver/
 
+# Banco vetorial do RAG (gerado por src/scripts/index_knowledge.py)
+data/chroma/
+
 # Airflow
 logs/
