@@ -75,6 +75,40 @@ class TestVolumePorGrupo:
         assert linhas["Costas"] == 3
 
 
+class TestVolumeTotalPorGrupo:
+    def test_soma_series_de_todo_o_historico_sem_filtro_de_data(self, session):
+        resultado = sql_layer.volume_total_por_grupo(session=session)
+
+        linhas = resultado.dados.set_index("grupo_muscular")["total_series"].to_dict()
+        # Peito: 4 (treino_recente) + 5 (treino_sem_data) = 9. Costas: 3 (treino_antigo).
+        assert linhas["Peito"] == 9
+        assert linhas["Costas"] == 3
+
+    def test_exclui_nao_mapeado(self, session):
+        resultado = sql_layer.volume_total_por_grupo(session=session)
+
+        assert "Não Mapeado" not in set(resultado.dados["grupo_muscular"])
+
+    def test_informa_quantos_treinos_sem_data_existem(self, session):
+        resultado = sql_layer.volume_total_por_grupo(session=session)
+
+        assert resultado.treinos_sem_data_ignorados == 1
+
+
+class TestExerciciosDistintosPorGrupo:
+    def test_conta_exercicios_distintos_catalogados_por_grupo(self, session):
+        resultado = sql_layer.exercicios_distintos_por_grupo(session=session)
+
+        linhas = resultado.dados.set_index("grupo_muscular")["total_exercicios"].to_dict()
+        assert linhas["Peito"] == 1
+        assert linhas["Costas"] == 1
+
+    def test_exclui_nao_mapeado(self, session):
+        resultado = sql_layer.exercicios_distintos_por_grupo(session=session)
+
+        assert "Não Mapeado" not in set(resultado.dados["grupo_muscular"])
+
+
 class TestFrequenciaPorGrupo:
     def test_conta_treinos_distintos_por_grupo(self, session):
         resultado = sql_layer.frequencia_por_grupo(dias=30, session=session)

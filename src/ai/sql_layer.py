@@ -69,6 +69,54 @@ def volume_por_grupo(dias: int = 30, session: Session | None = None) -> Consulta
             session.close()
 
 
+def volume_total_por_grupo(session: Session | None = None) -> ConsultaResultado:
+    """Total de series por grupo muscular em TODO o historico, sem filtro de data.
+
+    Diferente de `volume_por_grupo`, nao exige `data_treino` preenchida -
+    util para visoes gerais (ex: dashboard) onde se quer o volume completo
+    em vez de uma janela recente, e treinos sem data sao maioria. Exercicios
+    "Nao Mapeado" (sem grupo muscular conhecido) sao excluidos.
+    """
+    session, owns_session = _resolve_session(session)
+    try:
+        rows = (
+            session.query(Exercicio.grupo_muscular, func.sum(Registro.series))
+            .join(Registro, Registro.exercicio_id == Exercicio.id)
+            .filter(Exercicio.grupo_muscular.is_not(None))
+            .group_by(Exercicio.grupo_muscular)
+            .all()
+        )
+        dados = pd.DataFrame(rows, columns=["grupo_muscular", "total_series"])
+        if not dados.empty:
+            dados["total_series"] = dados["total_series"].fillna(0).astype(int)
+        return ConsultaResultado(dados=dados, treinos_sem_data_ignorados=_contar_treinos_sem_data(session))
+    finally:
+        if owns_session:
+            session.close()
+
+
+def exercicios_distintos_por_grupo(session: Session | None = None) -> ConsultaResultado:
+    """Quantos exercicios canonicos distintos estao catalogados em cada grupo muscular.
+
+    Conta o dicionario de exercicios, nao os registros do historico - mede a
+    cobertura do dicionario canonico por grupo, nao volume de treino.
+    Exercicios "Nao Mapeado" (sem grupo muscular conhecido) sao excluidos.
+    """
+    session, owns_session = _resolve_session(session)
+    try:
+        rows = (
+            session.query(Exercicio.grupo_muscular, func.count(Exercicio.id))
+            .filter(Exercicio.grupo_muscular.is_not(None))
+            .group_by(Exercicio.grupo_muscular)
+            .all()
+        )
+        dados = pd.DataFrame(rows, columns=["grupo_muscular", "total_exercicios"])
+        return ConsultaResultado(dados=dados)
+    finally:
+        if owns_session:
+            session.close()
+
+
 def frequencia_por_grupo(dias: int = 30, session: Session | None = None) -> ConsultaResultado:
     """Quantos treinos distintos tocaram cada grupo muscular nos ultimos `dias` dias.
 
